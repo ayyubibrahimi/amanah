@@ -13,7 +13,7 @@ import os
 # Setting environment variables
 os.environ['LANGCHAIN_TRACING_V2'] = 'true'
 os.environ['LANGCHAIN_ENDPOINT'] = 'https://api.smith.langchain.com'
-os.environ['LANGCHAIN_API_KEY'] = 'ls__670ac371167a468cb531ec23a7cb8f44'  # Replace with your actual API key
+os.environ['LANGCHAIN_API_KEY'] = ''  # Replace with your actual API key
 os.environ['LANGCHAIN_PROJECT'] = 'amanah'
 
 load_dotenv(find_dotenv())
