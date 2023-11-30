@@ -245,7 +245,7 @@ def generate_report(question):
     return response
 
 def synthesize_report(initial_report):
-    llm = ChatOpenAI(api_key="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")
+    llm = ChatOpenAI(api_key="")
 
     prompt = PromptTemplate(
         input_variables=["initial_report"],
