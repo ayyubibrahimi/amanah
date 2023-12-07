@@ -17,6 +17,15 @@ from langchain.chains import LLMChain
 import pandas as pd
 import json
 import ast
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
 
 
 load_dotenv(find_dotenv())
@@ -24,46 +33,75 @@ load_dotenv(find_dotenv())
 
 RESULTS_PER_QUESTION = 3
 
-ddg_search = DuckDuckGoSearchAPIWrapper()
-
 
 def word_count(text):
     return len(re.findall(r"\w+", text))
 
 
-# Function to check if the report meets the word count requirement
 def check_report_length(report, min_word_count=1000):
     return word_count(report) >= min_word_count
 
 
 def prompt_for_more_content(current_report, iteration, max_iterations=5):
-    # Areas for generating sub-questions focused on recent analysis and current information
     detail_areas = {
         "recent economic indicators": "What are the most recent economic indicators affecting SPY, and how do they compare to the previous quarter's data?",
         "latest analyst opinions": "Can you find the latest analyst opinions on SPY, especially any published in the last month, and summarize their key points?",
         "current market trends": "What are the current market trends impacting SPY, and how might these trends influence its performance in the near future?",
         "historical vs current data": "How does SPY's performance in the current quarter compare to the same quarter in previous years?",
-        "recent news events": "Are there any recent news events or developments that have had a significant impact on SPY, and what are the implications of these events?"
+        "recent news events": "Are there any recent news events or developments that have had a significant impact on SPY, and what are the implications of these events?",
     }
 
     areas_to_expand = []
 
-    # Check for areas to generate sub-questions focused on recent information
     for area, prompt in detail_areas.items():
         if area not in current_report.lower():
             areas_to_expand.append(prompt)
 
-    # Prompt for general expansion if no specific areas are identified
     if not areas_to_expand:
-        areas_to_expand.append("What are some additional questions we can ask to understand the latest developments and forecasts regarding SPY's future performance?")
+        areas_to_expand.append(
+            "What are some additional questions we can ask to understand the latest developments and forecasts regarding SPY's future performance?"
+        )
 
     additional_prompt = f"Iteration {iteration}/{max_iterations}:\nPlease consider the following areas and questions for further exploration with a focus on the most recent information: {', '.join(areas_to_expand)}"
     return additional_prompt
 
 
-def web_search(query: str, num_results: int = RESULTS_PER_QUESTION):
-    results = ddg_search.results(query, num_results)
-    return [r["link"] for r in results]
+def web_search(query, num_results=3, delay=1):
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        driver.get("https://search.yahoo.com")
+        time.sleep(delay)
+
+        search_box = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.NAME, "p"))
+        )
+        search_box.send_keys(query)
+        search_box.send_keys(Keys.RETURN)
+
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, ".dd.algo.algo-sr.Sr"))
+        )
+
+        urls = []
+        search_results = driver.find_elements(By.CSS_SELECTOR, ".dd.algo.algo-sr.Sr")
+        for result in search_results[:num_results]:
+            link = result.find_element(By.TAG_NAME, "a").get_attribute("href")
+            urls.append(link)
+
+        return urls
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return []
+
+    finally:
+        # Close the browser
+        driver.quit()
 
 
 SUMMARY_TEMPLATE = """{text} 
@@ -76,19 +114,14 @@ SUMMARY_PROMPT = ChatPromptTemplate.from_template(SUMMARY_TEMPLATE)
 
 
 def scrape_text(url: str):
-    # Send a GET request to the webpage
     try:
         response = requests.get(url)
 
-        # Check if the request was successful
         if response.status_code == 200:
-            # Parse the content of the request with BeautifulSoup
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # Extract all text from the webpage
             page_text = soup.get_text(separator=" ", strip=True)
 
-            # Print the extracted text
             return page_text
         else:
             return f"Failed to retrieve the webpage: Status code {response.status_code}"
@@ -99,6 +132,21 @@ def scrape_text(url: str):
 
 url = "https://en.wikipedia.org/wiki/SPDR_S%26P_500_Trust_ETF"
 
+
+SEARCH_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "user",
+            "Write 3 google search queries to search online that aim to answer the following question. Please prioritize  "
+            "opinions and predictions from financial analysts and reputable websites. Avoid sources with paywalls. "
+            "Prioritize content like articles, reports, or analyses that are freely accessible and provide detailed insights. "
+            "Your objective is to answer the following: {question}\n"
+            "You must respond with a list of strings in the following format: "
+            '["query 1", "query 2", "query 3"].',
+        ),
+    ]
+)
+
 scrape_and_summarize_chain = RunnablePassthrough.assign(
     summary=RunnablePassthrough.assign(text=lambda x: scrape_text(x["url"]))
     | SUMMARY_PROMPT
@@ -106,23 +154,11 @@ scrape_and_summarize_chain = RunnablePassthrough.assign(
     | StrOutputParser()
 ) | (lambda x: f"URL: {x['url']}\n\nSUMMARY: {x['summary']}")
 
+
 web_search_chain = (
     RunnablePassthrough.assign(urls=lambda x: web_search(x["question"]))
     | (lambda x: [{"question": x["question"], "url": u} for u in x["urls"]])
     | scrape_and_summarize_chain.map()
-)
-
-
-SEARCH_PROMPT = ChatPromptTemplate.from_messages(
-    [
-        (
-            "user",
-            "Write 3 google search queries to search online that form an "
-            "objective opinion from the following: {question}\n"
-            "You must respond with a list of strings in the following format: "
-            '["query 1", "query 2", "query 3"].',
-        ),
-    ]
 )
 
 search_question_chain = (
@@ -153,12 +189,12 @@ RESEARCH_REPORT_TEMPLATE = """
 ### Report Guidelines:
 - **Objective**: Formulate a clear, unbiased opinion based on the provided information.
 - **Structure**: Adhere to a well-organized format with a distinct introduction, body, and conclusion.
-- **Detail**: Include in-depth analysis, focusing on extracting sentiment scores (bullish, neutral, bearish), key economic indicators (like inflation rates, employment figures), and specific forecasts or numerical data from each source. Incorporate facts, figures, and data where applicable.
-- **Length**: Target a minimum of 10,000 words, extending as necessary to encompass all relevant information.
+- **Detail**: Include in-depth analysis, focusing on extracting sentiment scores (bullish, neutral, bearish), key economic indicators (like inflation rates, employment figures), and specific forecasts or numerical data from each source. Incorporate facts, figures, and data where applicable. Additionally, include quotes from the news article that support your deductions. 
+- **Length**: Target a minimum of 1000 words, extending as necessary to encompass all relevant information.
 - **Formatting**: Use markdown syntax for clear formatting and APA style for academic rigor.
 - **Citations**: List all used sources with URLs at the end of the report. Avoid duplicate sources and cite inline using APA format.
 - **Tone**: Maintain a journalistic and unbiased tone throughout the report.
-- **Deadline Awareness**: Assume the current date is 11/26/2023. Your report should prioritize recently produced news.
+- **Deadline Awareness**: Assume the current date is 12/6/2023. Your report should prioritize recently produced news.
 
 ### Additional Instructions:
 - **Comprehensiveness**: Strive to cover all aspects of the question, using the most relevant and updated information. Pay special attention to recent economic indicators, market sentiment, and analyst forecasts.
@@ -198,7 +234,7 @@ chain = (
 )
 
 
-def convert_to_pdf(text, filename="../data/reports/11-26-2023.pdf"):
+def convert_to_pdf(text, filename="../data/reports/12-3-2023.pdf"):
     if not text:
         print("No content to convert to PDF.")
         return
@@ -231,7 +267,7 @@ def convert_to_pdf(text, filename="../data/reports/11-26-2023.pdf"):
 def generate_report(question):
     response = chain.invoke({"question": question})
     iteration = 1
-    max_iterations = 5 # Set the maximum number of iterations
+    max_iterations = 3
 
     while not check_report_length(response, 1000) and iteration <= max_iterations:
         additional_content_prompt = prompt_for_more_content(
@@ -243,6 +279,7 @@ def generate_report(question):
         iteration += 1
 
     return response
+
 
 def synthesize_report(initial_report):
     llm = ChatOpenAI(api_key="")
@@ -259,17 +296,27 @@ def synthesize_report(initial_report):
 
         Example of expected output:
         
-        source_name: Source Name,
-        sentiment_score: 1,
-        key_insights: Detailed insights here...,
-        specific_forecasts: Specific forecasts here...
+        source_name: 
+        sentiment_score: 
+        key_insights: 
+        specific_forecasts: 
+    
+        source_name: 
+        sentiment_score: 
+        key_insights: 
+        specific_forecasts: 
+
+        source_name: 
+        sentiment_score: 
+        key_insights: 
+        specific_forecasts: 
 
         This format will make it easier to convert the information into a pandas DataFrame. Now, analyze and refine the report as follows:
 
         ----
         {initial_report}
         ----
-        """
+        """,
     )
 
     chain = LLMChain(llm=llm, prompt=prompt)
@@ -279,32 +326,39 @@ def synthesize_report(initial_report):
 
 def process_report_for_lstm(report):
     try:
-        # Safely evaluate the string as a Python literal
-        data_list = ast.literal_eval(report)
+        reports = report.split("][")
+        all_data = []
 
-        # Check if the evaluated data is a list
-        if not isinstance(data_list, list):
-            raise ValueError("Report is not in the expected list format.")
+        for i, report in enumerate(reports):
+            if i == 0:
+                report = report + "]"
+            elif i == len(reports) - 1:
+                report = "[" + report
+            else:
+                report = "[" + report + "]"
 
-        # Prepare data for DataFrame
-        data = {
-            "source": [],
-            "sentiment_score": []
-        }
+            data_list = ast.literal_eval(report)
 
-        # Extract 'source_name' and 'sentiment_score' from each dictionary in the list
-        for item in data_list:
-            source = item.get('source_name', 'Unknown')
-            sentiment_score = item.get('sentiment_score', 0)
+            if not isinstance(data_list, list):
+                raise ValueError("Report segment is not in the expected list format.")
 
-            # Append to the data dictionary
-            data["source"].append(source)
-            data["sentiment_score"].append(sentiment_score)
+            for item in data_list:
+                source = item.get("source_name", "Unknown")
+                sentiment_score = item.get("sentiment_score", 0)
+                key_insights = item.get("key_insights", "No insights")
+                forecasts = item.get("specific_forecasts", [])
 
-        # Convert to DataFrame
-        df = pd.DataFrame(data)
-        df.to_csv("../data/predictions/output.csv")
+                all_data.append(
+                    {
+                        "source": source,
+                        "sentiment_score": sentiment_score,
+                        "key_insights": key_insights,
+                        "specific_forecasts": forecasts,
+                    }
+                )
+        df = pd.DataFrame(all_data)
 
+        df.to_csv("../data/predictions/output.csv", index=False)
 
     except (SyntaxError, ValueError) as e:
         print(f"Error processing report: {e}")
@@ -313,24 +367,54 @@ def process_report_for_lstm(report):
     return df
 
 
+def split_report(report):
+    one_quarter = len(report) // 4
+    half = len(report) // 2
+    three_quarters = 3 * len(report) // 4
 
-initial_report = generate_report("Conduct an in-depth analysis of the SPDR S&P 500 ETF Trust (SPY) for the next quarter, focusing on extracting quantifiable sentiment scores, economic indicators, and specific numerical forecasts from various sources. Analyze recent trends, market sentiment, and analyst predictions to determine potential impacts on SPY's performance. Summarize these in a structured format suitable for time series analysis.")
+    first_part = report[:one_quarter]
+    second_part = report[one_quarter:half]
+    third_part = report[half:three_quarters]
+    fourth_part = report[three_quarters:]
+    return first_part, second_part, third_part, fourth_part
 
-# print(f"Report prior to synthesizing: {initial_report}")
-synthesized_report = synthesize_report(initial_report)
 
-print(f"Synthesized report prior to parsing: {synthesized_report}")
+def process_and_concatenate_reports(
+    report_part1, report_part2, report_part3, report_part4
+):
+    synthesized_part1 = synthesize_report(report_part1)
+    synthesized_part2 = synthesize_report(report_part2)
+    synthesized_part3 = synthesize_report(report_part3)
+    synthesized_part4 = synthesize_report(report_part4)
 
-# Process the report
-report = process_report_for_lstm(synthesized_report)
+    synthesized_report = (
+        synthesized_part1 + synthesized_part2 + synthesized_part3 + synthesized_part4
+    )
+    return synthesized_report
 
-# Check if the report DataFrame is not empty
-if not report.empty:
-    # Convert to PDF
-    convert_to_pdf(synthesized_report)
-    print("PDF successfully saved.")
-else:
-    print("No report generated.")
 
-# Printing the synthesized report for reference
-print(f"Extracted features: {report}")
+if __name__ == "__main__":
+    initial_report = generate_report(
+        "Conduct an in-depth analysis of how the SPDR S&P 500 ETF Trust (SPY) is expected to perform in 2024, focusing on extracting quantifiable sentiment scores, economic indicators, and specific numerical forecasts from various sources. Analyze recent trends, market sentiment, and analyst predictions to determine potential impacts on SPY's performance. Summarize these in a structured format suitable for time series analysis."
+    )
+    print(initial_report)
+
+    report_part1, report_part2, report_part3, report_part4 = split_report(
+        initial_report
+    )
+
+    synthesized_report = process_and_concatenate_reports(
+        report_part1, report_part2, report_part3, report_part4
+    )
+
+    print(f"Synthesized report prior to parsing: {synthesized_report}")
+
+    report = process_report_for_lstm(synthesized_report)
+
+    if not report.empty:
+        convert_to_pdf(initial_report)
+        print("PDF successfully saved.")
+    else:
+        print("No report generated.")
+
+    print(f"Extracted features: {report}")

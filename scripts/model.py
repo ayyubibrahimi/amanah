@@ -106,7 +106,7 @@ def train_lstm_model(X, y, epochs=100, batch_size=32):
 
 # Main Function with LSTM Model Training
 def main():
-    spy_data = collect_data('SPY', '2023-01-01', '2023-11-19')
+    spy_data = collect_data('SPY', '2008-01-01', '2023-11-19')
     spy_data_fe = feature_engineering(spy_data)
 
     features = ["MA_7", 'MA_20', 'MA_50', 'Volume_Change']
